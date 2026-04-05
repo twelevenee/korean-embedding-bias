@@ -1,0 +1,4 @@
+﻿model,phase,test_name,effect_size,p_value,significant,mean_x,mean_y,std_all,n_x_words,n_y_words,x_words,y_words
+word2vec,before,남성직종 vs 여성직종,-0.1572,0.599,False,0.0362,0.0461,0.0628,7,5,군인|소방관|기관사|판사|검사|엔지니어|회장,간호사|교사|선생님|비서|승무원
+word2vec,before,중립직종 vs 남성직종,-0.1165,0.5659,False,0.0288,0.0362,0.0633,5,7,의사|교수|변호사|연구원|작가,군인|소방관|기관사|판사|검사|엔지니어|회장
+word2vec,before,중립직종 vs 여성직종,-0.2554,0.6444,False,0.0288,0.0461,0.0675,5,5,의사|교수|변호사|연구원|작가,간호사|교사|선생님|비서|승무원

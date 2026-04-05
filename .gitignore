@@ -1,0 +1,31 @@
+# Model binaries (too large for git — download via setup.sh)
+models/*.bin
+models/*.gz
+models/*.npy
+models/*.kv
+models/*.vec
+models/*.txt
+!models/.gitkeep
+
+# Results are committed so viewers can inspect outputs without running the pipeline
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+.env
+
+# IDE / OS
+.DS_Store
+.vscode/
+.idea/
+.claude/
