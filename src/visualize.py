@@ -514,3 +514,90 @@ def results_to_dataframe(
         "mean_y": r.mean_y,
     } for r in results]
     return pd.DataFrame(rows)
+
+
+def plot_alpha_tradeoff(
+    alpha_results: dict,
+    output_path: Optional[Path] = None,
+) -> plt.Figure:
+    """
+    Plot WEAT effect size vs debiasing strength (alpha) for each test.
+
+    Visualizes the tradeoff between bias reduction and semantic distortion
+    introduced by partial debiasing (alpha parameter in neutralize()).
+
+    Args:
+        alpha_results: dict mapping alpha (float) → list of WEATResult
+                       e.g. {0.0: [...], 0.1: [...], ..., 1.0: [...]}
+        output_path:   if provided, saves the figure to this path
+
+    Returns:
+        matplotlib Figure
+    """
+    alphas = sorted(alpha_results.keys())
+    # Collect all test names in order from the first alpha entry
+    test_names = [r.test_name for r in alpha_results[alphas[0]]]
+
+    # Build {test_name: [d at each alpha]} mapping
+    effect_by_test: Dict[str, List[float]] = {name: [] for name in test_names}
+    sig_by_test: Dict[str, List[bool]] = {name: [] for name in test_names}
+    for a in alphas:
+        results_at_a = {r.test_name: r for r in alpha_results[a]}
+        for name in test_names:
+            r = results_at_a.get(name)
+            effect_by_test[name].append(r.effect_size if r else float("nan"))
+            sig_by_test[name].append(r.significant if r else False)
+
+    colors = ["#2166ac", "#d6604d", "#4dac26"]
+    markers = ["o", "s", "^"]
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+
+    for (name, d_values), color, marker in zip(effect_by_test.items(), colors, markers):
+        ax.plot(alphas, d_values, color=color, marker=marker,
+                linewidth=2, markersize=6, label=name)
+        # Mark significant points with filled markers, non-significant with open
+        for a, d, sig in zip(alphas, d_values, sig_by_test[name]):
+            if sig:
+                ax.plot(a, d, marker=marker, color=color,
+                        markersize=9, markerfacecolor=color, zorder=5)
+            else:
+                ax.plot(a, d, marker=marker, color=color,
+                        markersize=9, markerfacecolor="white",
+                        markeredgewidth=1.5, zorder=5)
+
+    # Reference lines
+    ax.axhline(0, color="black", linewidth=0.8, linestyle="--", alpha=0.5)
+    ax.axvline(1.0, color="gray", linewidth=0.8, linestyle=":", alpha=0.7,
+               label="α=1.0 (hard debiasing)")
+
+    # Shade overcorrection region (where neutral-vs-female flips sign)
+    nf_values = effect_by_test.get("중립직종 vs 여성직종", [])
+    if nf_values:
+        sign_flip_alpha = None
+        for i in range(len(alphas) - 1):
+            if nf_values[i] > 0 and nf_values[i + 1] <= 0:
+                # Linear interpolation
+                sign_flip_alpha = alphas[i] + (alphas[i + 1] - alphas[i]) * (
+                    nf_values[i] / (nf_values[i] - nf_values[i + 1])
+                )
+                break
+        if sign_flip_alpha is not None:
+            ax.axvspan(sign_flip_alpha, max(alphas), alpha=0.06, color="red",
+                       label=f"과교정 영역 (α > {sign_flip_alpha:.2f})")
+            ax.axvline(sign_flip_alpha, color="red", linewidth=1.2,
+                       linestyle="--", alpha=0.6)
+
+    ax.set_xlabel("Debiasing 강도 (α)", fontsize=12)
+    ax.set_ylabel("Effect Size (d)", fontsize=12)
+    ax.set_title("부분 디바이어싱 트레이드오프: α별 WEAT Effect Size\n"
+                 "(채운 마커 = p < 0.05 유의)", fontsize=12)
+    ax.legend(fontsize=9, loc="lower left")
+    ax.set_xlim(-0.02, 1.05)
+    ax.grid(axis="y", alpha=0.3)
+
+    fig.tight_layout()
+    if output_path is not None:
+        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        print(f"Saved: {output_path}")
+    return fig

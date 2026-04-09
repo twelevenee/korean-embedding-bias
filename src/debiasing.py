@@ -10,6 +10,13 @@ Pipeline:
   4. hard_debias               — full pipeline
   5. build_debiased_lookup     — returns {word: debiased_vec} for WEAT override
 
+Partial debiasing extension (alpha parameter):
+  Standard hard debiasing fully removes the gender component (alpha=1.0).
+  Setting 0 < alpha < 1 partially removes it:
+      v' = v - alpha * (v · g) * g
+  This allows trading off bias reduction against semantic distortion.
+  alpha=0.0 → no debiasing; alpha=1.0 → full hard debiasing.
+
 Design: the original EmbeddingModel is never mutated. All functions return
 plain np.ndarray objects. Debiased vectors are fed into run_weat() via its
 vector_override parameter for clean before/after comparison.
@@ -84,16 +91,22 @@ def compute_gender_direction(
 def neutralize(
     word_vecs: np.ndarray,
     gender_direction: np.ndarray,
+    alpha: float = 1.0,
 ) -> np.ndarray:
     """
     Remove the gender component from each word vector.
 
-    v_debiased = v - (v · g) * g
+    v_debiased = v - alpha * (v · g) * g
     Then L2-renormalize to keep unit norm.
+
+    alpha=1.0 → full hard debiasing (Bolukbasi 2016 default)
+    alpha=0.0 → no change
+    0 < alpha < 1 → partial debiasing
 
     Args:
         word_vecs:        shape (n, d), L2-normalized
         gender_direction: shape (d,), unit vector g
+        alpha:            debiasing strength in [0.0, 1.0]
 
     Returns:
         Debiased vectors of shape (n, d), L2-normalized.
@@ -101,8 +114,8 @@ def neutralize(
     g = gender_direction
     # projections: shape (n,)
     projections = word_vecs @ g
-    # remove gender component: shape (n, d)
-    debiased = word_vecs - np.outer(projections, g)
+    # partially remove gender component: shape (n, d)
+    debiased = word_vecs - alpha * np.outer(projections, g)
 
     # L2-renormalize
     norms = np.linalg.norm(debiased, axis=1, keepdims=True)
@@ -118,6 +131,7 @@ def equalize(
     male_vecs: np.ndarray,
     female_vecs: np.ndarray,
     gender_direction: np.ndarray,
+    alpha: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Equalize gender word pairs so they are equidistant from the gender axis midpoint.
@@ -126,15 +140,21 @@ def equalize(
       mean_vec    = (e+ + e-) / 2
       neutralized = mean_vec - (mean_vec · g) * g
       scalar      = sqrt(max(0, 1 - ||neutralized||²))
-      e+_new      = normalize(neutralized + scalar * g)
-      e-_new      = normalize(neutralized - scalar * g)
+      e+_full     = normalize(neutralized + scalar * g)   # fully equalized
+      e-_full     = normalize(neutralized - scalar * g)
 
-    This ensures cos(e+_new, g) == -cos(e-_new, g) for each pair.
+    With alpha scaling, the output is interpolated between the original and fully
+    equalized vectors:
+      e+_out = normalize((1 - alpha) * e+ + alpha * e+_full)
+
+    alpha=1.0 → full equalization (Bolukbasi 2016 default)
+    alpha=0.0 → original vectors unchanged
 
     Args:
         male_vecs:        shape (n, d), L2-normalized
         female_vecs:      shape (n, d), L2-normalized
         gender_direction: shape (d,), unit vector g
+        alpha:            equalization strength in [0.0, 1.0]
 
     Returns:
         (male_equalized, female_equalized), each shape (n, d), L2-normalized.
@@ -145,21 +165,29 @@ def equalize(
 
     for i, (e_plus, e_minus) in enumerate(zip(male_vecs, female_vecs)):
         mean_vec = (e_plus + e_minus) / 2.0
-        # Remove gender component from mean
         mean_proj = np.dot(mean_vec, g)
         mu = mean_vec - mean_proj * g
 
         mu_norm_sq = np.dot(mu, mu)
         scalar = np.sqrt(max(0.0, 1.0 - mu_norm_sq))
 
-        e_plus_new = mu + scalar * g
-        e_minus_new = mu - scalar * g
+        e_plus_full = mu + scalar * g
+        e_minus_full = mu - scalar * g
 
-        # L2-normalize
-        norm_p = np.linalg.norm(e_plus_new)
-        norm_m = np.linalg.norm(e_minus_new)
-        male_eq[i] = e_plus_new / norm_p if norm_p > 1e-10 else e_plus_new
-        female_eq[i] = e_minus_new / norm_m if norm_m > 1e-10 else e_minus_new
+        # L2-normalize fully equalized vectors
+        norm_p = np.linalg.norm(e_plus_full)
+        norm_m = np.linalg.norm(e_minus_full)
+        e_plus_full = e_plus_full / norm_p if norm_p > 1e-10 else e_plus_full
+        e_minus_full = e_minus_full / norm_m if norm_m > 1e-10 else e_minus_full
+
+        # Interpolate between original and fully equalized, then renormalize
+        e_plus_out = (1.0 - alpha) * e_plus + alpha * e_plus_full
+        e_minus_out = (1.0 - alpha) * e_minus + alpha * e_minus_full
+
+        norm_po = np.linalg.norm(e_plus_out)
+        norm_mo = np.linalg.norm(e_minus_out)
+        male_eq[i] = e_plus_out / norm_po if norm_po > 1e-10 else e_plus_out
+        female_eq[i] = e_minus_out / norm_mo if norm_mo > 1e-10 else e_minus_out
 
     return male_eq, female_eq
 
@@ -174,6 +202,7 @@ def hard_debias(
     male_words: List[str],
     female_words: List[str],
     gender_direction_method: str = "pca",
+    alpha: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str], List[str], List[str]]:
     """
     Full Bolukbasi hard debiasing pipeline.
@@ -205,8 +234,8 @@ def hard_debias(
     female_found_paired = female_found[:n_pairs]
 
     g = compute_gender_direction(male_vecs_paired, female_vecs_paired, method=gender_direction_method)
-    occ_debiased = neutralize(occ_vecs, g)
-    male_eq, female_eq = equalize(male_vecs_paired, female_vecs_paired, g)
+    occ_debiased = neutralize(occ_vecs, g, alpha=alpha)
+    male_eq, female_eq = equalize(male_vecs_paired, female_vecs_paired, g, alpha=alpha)
 
     return occ_debiased, male_eq, female_eq, g, occ_found, male_found_paired, female_found_paired
 
@@ -217,6 +246,7 @@ def build_debiased_lookup(
     male_words: List[str],
     female_words: List[str],
     gender_direction_method: str = "pca",
+    alpha: float = 1.0,
 ) -> Dict[str, np.ndarray]:
     """
     Run hard_debias and return a {word: debiased_vector} dict.
@@ -224,11 +254,16 @@ def build_debiased_lookup(
     This dict is passed as vector_override to run_weat() so WEAT uses
     debiased vectors without mutating the original model.
 
+    alpha controls debiasing strength uniformly across both steps:
+      - neutralize: v' = v - alpha * (v·g) * g
+      - equalize:   interpolate alpha fraction toward fully equalized position
+    alpha=1.0 → full hard debiasing; alpha=0.0 → no change.
+
     Returns:
         dict mapping each word (occupation + gender attrs) to its debiased vector.
     """
     occ_debiased, male_eq, female_eq, g, occ_found, male_found, female_found = hard_debias(
-        model, occupation_words, male_words, female_words, gender_direction_method
+        model, occupation_words, male_words, female_words, gender_direction_method, alpha=alpha
     )
 
     lookup: Dict[str, np.ndarray] = {}
